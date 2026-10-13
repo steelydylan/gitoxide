@@ -57,6 +57,7 @@ impl TimeBuf {
 impl Time {
     /// Serialize this instance into `buf`, exactly as it would appear in the header of a Git commit,
     /// and return `buf` as `&str` for easy consumption.
+    #[gix_macros::unstable(reason = "Exposes an experimental timestamp buffer type.")]
     pub fn to_str<'a>(&self, buf: &'a mut TimeBuf) -> &'a str {
         buf.clear();
         self.write_to(&mut TimeBufWriter(buf))

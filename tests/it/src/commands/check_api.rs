@@ -274,13 +274,21 @@ fn check_boundary(
         }
         let provisional = required_str(dependency, "version")?.starts_with("0.");
         let blanket = allowed_crates.contains(&name);
+        let supported = if provisional {
+            None
+        } else {
+            Some(walk_supported(document, &[document["root"].clone()])?.seen)
+        };
         for path in paths {
             let id = resolve_item(document, &names, &path)?;
             if !seen.insert((name.clone(), id.clone())) {
                 continue;
             }
             let item = &document["index"][&id];
-            if unstable(item) || (provisional && !blanket && !allowed_ids.contains(&id)) {
+            if unstable(item)
+                || (provisional && !blanket && !allowed_ids.contains(&id))
+                || supported.as_ref().is_some_and(|items| !items.contains(&id))
+            {
                 eprintln!("Stable API exposes experimental plumbing item {path}");
                 valid = false;
                 continue;
@@ -339,10 +347,10 @@ fn resolve_item(document: &Value, names: &BTreeMap<String, String>, path: &str) 
 }
 
 fn item_path(document: &Value, id: &str) -> String {
-    document["paths"][id]["path"]
-        .as_array()
-        .map(|parts| parts.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("::"))
-        .unwrap_or_else(|| id.to_owned())
+    document["paths"][id]["path"].as_array().map_or_else(
+        || id.to_owned(),
+        |parts| parts.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("::"),
+    )
 }
 
 fn unstable(item: &Value) -> bool {
@@ -399,7 +407,15 @@ fn rustdoc_document(
         .arg(manifest)
         .args(["--target", host])
         .args(features)
-        .args(["--", "-Z", "unstable-options", "--output-format", "json"]);
+        .args([
+            "--",
+            "-D",
+            "warnings",
+            "-Z",
+            "unstable-options",
+            "--output-format",
+            "json",
+        ]);
     successful(rustdoc)?;
     fs::copy(path, output)?;
     Ok(serde_json::from_reader(fs::File::open(output)?)?)
@@ -1135,6 +1151,17 @@ mod tests {
                 })
             })?,
             "each exposed provisional type needs its own explicit exception"
+        );
+        metadata["packages"][0]["version"] = json!("1.0.0");
+        let mut hidden = dependency;
+        hidden["index"]["0"]["inner"]["module"]["items"] = json!([6]);
+        hidden["index"]["6"] = json!({
+            "crate_id": 0, "visibility": "public", "docs": "\n\n**Unstable.**",
+            "inner": {"use": {"name": "Item", "id": 1}}
+        });
+        assert!(
+            !check_boundary(&transitive_root, &policy, &metadata, |_| Ok(hidden.clone()))?,
+            "an experimental re-export in a stable dependency does not make its type supported through feature unification"
         );
         Ok(())
     }
