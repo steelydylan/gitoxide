@@ -2,10 +2,13 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{Attribute, ImplItem, Item, ItemStruct, LitStr, Visibility, parse::Parse, parse_quote, spanned::Spanned};
 
-struct Reason(LitStr);
+struct Reason(Option<LitStr>);
 
 impl Parse for Reason {
     fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        if input.is_empty() {
+            return Ok(Self(None));
+        }
         let name: syn::Ident = input.parse()?;
         if name != "reason" {
             return Err(syn::Error::new(name.span(), "expected `reason = \"...\"`"));
@@ -18,13 +21,16 @@ impl Parse for Reason {
                 "the instability reason must not be empty",
             ));
         }
-        Ok(Self(reason))
+        Ok(Self(Some(reason)))
     }
 }
 
 impl Reason {
     fn document(&self, attrs: &mut Vec<Attribute>) {
-        let note = format!("\n\n**Unstable:** {}", self.0.value());
+        let note = match &self.0 {
+            Some(reason) => format!("\n\n**Unstable:** {}", reason.value()),
+            None => "\n\n**Unstable.**".into(),
+        };
         attrs.push(parse_quote!(#[doc = #note]));
     }
 }
@@ -101,10 +107,7 @@ pub(crate) fn item(attrs: TokenStream, input: TokenStream) -> syn::Result<TokenS
 
 pub(crate) fn fields(attrs: TokenStream, input: TokenStream) -> syn::Result<TokenStream> {
     if !attrs.is_empty() {
-        return Err(syn::Error::new_spanned(
-            attrs,
-            "put `#[unstable(reason = \"...\")]` on each gated field",
-        ));
+        return Err(syn::Error::new_spanned(attrs, "put `#[unstable]` on each gated field"));
     }
     let mut stable: ItemStruct = syn::parse2(input)?;
     let mut unstable = stable.clone();
@@ -116,10 +119,14 @@ pub(crate) fn fields(attrs: TokenStream, input: TokenStream) -> syn::Result<Toke
                 if reason.is_some() {
                     return Err(syn::Error::new_spanned(
                         attr,
-                        "the field already has an instability reason",
+                        "the field already has an instability annotation",
                     ));
                 }
-                reason = Some(attr.parse_args::<Reason>()?);
+                reason = Some(if matches!(&attr.meta, syn::Meta::Path(_)) {
+                    Reason(None)
+                } else {
+                    attr.parse_args::<Reason>()?
+                });
             }
         }
         if let Some(reason) = reason {
@@ -133,7 +140,7 @@ pub(crate) fn fields(attrs: TokenStream, input: TokenStream) -> syn::Result<Toke
     if !annotated {
         return Err(syn::Error::new_spanned(
             stable,
-            "expected at least one field with `#[unstable(reason = \"...\")]`",
+            "expected at least one field with `#[unstable]`",
         ));
     }
     Ok(quote! {

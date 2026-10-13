@@ -63,9 +63,15 @@ path = {consumer:?}
     for diagnostic in [
         "module `plumbing` is private",
         "module `module` is private",
+        "module `module_without_reason` is private",
+        "struct `Raw` is private",
         "field `raw` of struct `Handle` is private",
+        "field `raw_without_reason` of struct `Handle` is private",
+        "field `raw_without_reason_with_parens` of struct `Handle` is private",
         "method `raw` is private",
         "method `individual` is private",
+        "method `without_reason` is private",
+        "associated constant `WITHOUT_REASON` is private",
         "`Handle` doesn't implement `std::fmt::Display`",
     ] {
         assert!(
@@ -93,7 +99,37 @@ path = {consumer:?}
                 "the reason is documented only with unstable enabled"
             );
         }
+        for item in [
+            "structfield.raw_without_reason",
+            "structfield.raw_without_reason_with_parens",
+            "method.individual",
+            "method.without_reason",
+            "associatedconstant.WITHOUT_REASON",
+        ] {
+            assert_eq!(
+                handle.contains(&format!("id=\"{item}\"")),
+                !features.is_empty(),
+                "bare-gated fields and inherent items appear in docs only with unstable enabled"
+            );
+        }
+        assert_eq!(
+            handle.contains("<strong>Unstable.</strong>"),
+            !features.is_empty(),
+            "bare gates document instability without inventing a reason"
+        );
         if !features.is_empty() {
+            let bare_module = std::fs::read_to_string(docs.join("module_without_reason/index.html"))
+                .expect("bare-gated module documentation exists");
+            assert!(
+                bare_module.contains("Bare gates also work on file-backed modules.")
+                    && bare_module.contains("<strong>Unstable.</strong>"),
+                "a bare module gate preserves original docs and adds an instability marker"
+            );
+            let raw = std::fs::read_to_string(docs.join("struct.Raw.html")).expect("bare-gated type docs exist");
+            assert!(
+                raw.contains("<strong>Unstable.</strong>"),
+                "an empty argument list also documents instability without a reason"
+            );
             let module = std::fs::read_to_string(docs.join("module/index.html")).expect("module documentation exists");
             assert!(
                 module.contains("File-backed module documentation is preserved."),

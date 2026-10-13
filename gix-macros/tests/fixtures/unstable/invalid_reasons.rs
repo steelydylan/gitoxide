@@ -1,6 +1,3 @@
-#[gix_macros::unstable]
-pub fn missing() {}
-
 #[gix_macros::unstable(reason = "  ")]
 pub fn empty() {}
 
@@ -15,5 +12,12 @@ pub struct EmptyField {
 
 #[gix_macros::unstable(reason = "")]
 pub mod missing;
+
+#[gix_macros::unstable_fields]
+pub struct DuplicateField {
+    #[unstable]
+    #[unstable(reason = "Another reason")]
+    pub field: usize,
+}
 
 fn main() {}
