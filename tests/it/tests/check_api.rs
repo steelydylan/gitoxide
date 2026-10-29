@@ -226,3 +226,92 @@ fn help_describes_release_and_audit_modes_without_reading_stdin() -> TestResult 
     }
     Ok(())
 }
+
+#[test]
+fn boundary_uses_manifest_exceptions_and_resolved_dependency_features() -> TestResult {
+    let directory = gix_testtools::tempfile::tempdir()?;
+    let root = directory.path();
+    for crate_name in ["consumer", "plumbing"] {
+        fs::create_dir_all(root.join(crate_name).join("src"))?;
+    }
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"consumer\", \"plumbing\"]\nresolver = \"2\"\n",
+    )?;
+    fs::write(
+        root.join("plumbing/Cargo.toml"),
+        r#"
+[package]
+name = "plumbing"
+version = "0.1.0"
+edition = "2024"
+[features]
+unstable = []
+leak = []
+[dev-dependencies]
+plumbing = { path = ".", features = ["leak"] }
+"#,
+    )?;
+    fs::write(
+        root.join("plumbing/src/lib.rs"),
+        r#"
+pub struct Basic;
+pub struct Experimental;
+impl Basic {
+    #[cfg(feature = "unstable")]
+    #[doc = "\n\n**Unstable.**"]
+    pub fn experimental(&self) -> Experimental { Experimental }
+    #[cfg(feature = "leak")]
+    pub fn supported(&self) -> Experimental { Experimental }
+}
+"#,
+    )?;
+    fs::write(
+        root.join("consumer/src/lib.rs"),
+        "pub fn read() -> plumbing::Basic { plumbing::Basic }\n",
+    )?;
+    let manifest = |recursive: bool, features: &str| {
+        format!(
+            r#"
+[package]
+name = "consumer"
+version = "1.0.0"
+edition = "2024"
+[dependencies]
+plumbing = {{ path = "../plumbing", features = ["unstable"{features}] }}
+[package.metadata.api-check]
+profiles = [{{ default-features = false, features = [] }}]
+allowed-unstable-types = ["plumbing::Basic"]
+recursive = {recursive}
+"#
+        )
+    };
+    for (recursive, features, expected, reason) in [
+        (
+            true,
+            "",
+            0,
+            "unified experimental methods remain outside the supported API",
+        ),
+        (
+            true,
+            ", \"leak\"",
+            10,
+            "resolved dependency features expose an unlisted type through a supported method",
+        ),
+        (
+            false,
+            ", \"leak\"",
+            0,
+            "direct checks do not recursively promise dependency members",
+        ),
+    ] {
+        fs::write(root.join("consumer/Cargo.toml"), manifest(recursive, features))?;
+        let output = check_api(root)
+            .env("CARGO_TARGET_DIR", root.join("target"))
+            .args(["boundary", "consumer/Cargo.toml"])
+            .output()?;
+        assert_exit(&output, expected, reason);
+    }
+    Ok(())
+}

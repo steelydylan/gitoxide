@@ -143,6 +143,7 @@ impl oid {
     }
 
     /// Return a type which can display itself in hexadecimal form with the `len` amount of characters.
+    #[gix_macros::unstable(reason = "Returns an experimental formatting type.")]
     #[inline]
     pub fn to_hex_with_len(&self, len: usize) -> HexDisplay<'_> {
         HexDisplay {
@@ -152,6 +153,7 @@ impl oid {
     }
 
     /// Return a type which displays this `oid` as hex in full.
+    #[gix_macros::unstable(reason = "Returns an experimental formatting type.")]
     #[inline]
     pub fn to_hex(&self) -> HexDisplay<'_> {
         HexDisplay {

@@ -82,6 +82,7 @@ mod convert {
         /// Borrow this instance as immutable, serializing the `time` field into `buf`.
         ///
         /// Commonly used as [`signature.to_ref(&mut TimeBuf::default())`](TimeBuf::default).
+        #[gix_macros::unstable(reason = "Exposes an experimental timestamp buffer type.")]
         pub fn to_ref<'a>(&'a self, time_buf: &'a mut TimeBuf) -> SignatureRef<'a> {
             SignatureRef {
                 name: self.name.as_ref(),

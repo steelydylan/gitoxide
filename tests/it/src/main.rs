@@ -55,10 +55,7 @@ fn main() -> Result<()> {
             count,
             asset_dir,
         } => commands::create_diff_cases(dry_run, sliders_file, &worktree_dir, destination_dir, count, asset_dir),
-        Subcommands::CheckApi { baseline_root, command } => {
-            let audit = command.map(|args::CheckApiCommand::Audit { json, allowed }| (json, allowed));
-            commands::check_api(baseline_root, audit)
-        }
+        Subcommands::CheckApi { baseline_root, command } => commands::check_api(baseline_root, command),
         Subcommands::CheckMode {} => commands::check_mode(),
         Subcommands::Env {} => commands::env(),
     }

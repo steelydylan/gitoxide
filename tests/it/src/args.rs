@@ -198,6 +198,11 @@ pub enum Subcommands {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum CheckApiCommand {
+    /// Check supported API profiles against the manifest's plumbing type exceptions.
+    Boundary {
+        /// The consuming crate's Cargo manifest.
+        manifest: PathBuf,
+    },
     /// Print public dependencies of a rustdoc JSON document without running release checks.
     Audit {
         /// The rustdoc JSON document to inspect.

@@ -10,6 +10,8 @@ use std::{
 use gix_testtools::{Result, tempfile};
 use serde_json::Value;
 
+use crate::args::CheckApiCommand;
+
 /// Run the release API guard or audit the dependencies exposed by a rustdoc JSON document.
 ///
 /// With no arguments, read a JSON request from stdin containing `package`, `manifest_path`,
@@ -22,11 +24,13 @@ use serde_json::Value;
 /// `audit JSON [CRATE,...]` prints the public dependencies of an existing rustdoc JSON document.
 /// When a comma-separated allowlist is provided, every exposed dependency must appear in it.
 /// This mode does not read stdin or run compatibility checks.
+/// `boundary MANIFEST` checks supported profiles against the manifest's type exceptions,
+/// optionally following supported dependency members when `api-check.recursive` is true.
 ///
 /// Exit with `0` for compatibility or a successful audit, `10` for detected incompatibility or
 /// an audit allowlist violation, and `2` when the check cannot complete.
-pub fn check_api(baseline_override: Option<PathBuf>, audit: Option<(PathBuf, Option<String>)>) -> ! {
-    let result = run(baseline_override, audit);
+pub fn check_api(baseline_override: Option<PathBuf>, command: Option<CheckApiCommand>) -> ! {
+    let result = run(baseline_override, command);
     match result {
         Ok(compatible) => std::process::exit(if compatible { 0 } else { 10 }),
         Err(err) => {
@@ -36,8 +40,37 @@ pub fn check_api(baseline_override: Option<PathBuf>, audit: Option<(PathBuf, Opt
     }
 }
 
-fn run(baseline_override: Option<PathBuf>, audit: Option<(PathBuf, Option<String>)>) -> Result<bool> {
-    if let Some((path, allowed)) = audit {
+fn run(baseline_override: Option<PathBuf>, command: Option<CheckApiCommand>) -> Result<bool> {
+    if let Some(CheckApiCommand::Boundary { manifest }) = &command {
+        let manifest = manifest.canonicalize()?;
+        let metadata = cargo_metadata(&manifest, &[])?;
+        let package = metadata["packages"]
+            .as_array()
+            .ok_or("metadata has no packages")?
+            .iter()
+            .find(|package| package["manifest_path"] == manifest.to_string_lossy().as_ref())
+            .ok_or("manifest package missing from metadata")?;
+        let name = required_str(package, "name")?;
+        let unstable = package["metadata"]["smart-release"]["unstable-features"]
+            .as_array()
+            .map_or_else(|| Ok(Vec::new()), |value| string_array(&Value::Array(value.clone())))?;
+        let output = tempfile::tempdir()?;
+        let mut valid = true;
+        for (index, profile) in profiles(package)?.iter().enumerate() {
+            let features = feature_args(profile, &package["features"], &unstable)?;
+            let resolved = cargo_metadata(&manifest, &features)?;
+            let document = rustdoc_document(
+                &manifest,
+                &features,
+                &resolved,
+                name,
+                &output.path().join(format!("{index}.json")),
+            )?;
+            valid &= boundary_check(&document, package, &resolved, &features, output.path())?;
+        }
+        return Ok(valid);
+    }
+    if let Some(CheckApiCommand::Audit { json: path, allowed }) = command {
         let document = serde_json::from_reader(fs::File::open(path)?)?;
         let dependencies = public_dependencies(&document)?;
         println!("{}", serde_json::to_string_pretty(&dependencies)?);
@@ -55,10 +88,7 @@ fn run(baseline_override: Option<PathBuf>, audit: Option<(PathBuf, Option<String
     let metadata = cargo_metadata(&manifest, &[])?;
     let package_metadata = find_package(&metadata, package, &manifest)?;
     let root = Path::new(required_str(&metadata, "workspace_root")?);
-    let profiles = package_metadata["metadata"]["api-check"]["profiles"]
-        .as_array()
-        .filter(|profiles| !profiles.is_empty())
-        .ok_or("package.metadata.api-check.profiles must describe the supported stable feature profiles")?;
+    let profiles = profiles(package_metadata)?;
     let unstable = string_array(&request["unstable_features"])?;
     let dependencies = request["dependencies"]
         .as_array()
@@ -87,6 +117,13 @@ fn run(baseline_override: Option<PathBuf>, audit: Option<(PathBuf, Option<String
             &baseline_metadata,
             package,
             &baseline_json,
+        )?;
+        compatible &= boundary_check(
+            &document,
+            package_metadata,
+            &current_metadata,
+            &feature_args,
+            baseline_dir.path(),
         )?;
         let exposed = public_dependencies(&document)?;
         eprintln!(
@@ -136,6 +173,194 @@ fn run(baseline_override: Option<PathBuf>, audit: Option<(PathBuf, Option<String
         }
     }
     Ok(compatible)
+}
+
+fn profiles(package: &Value) -> Result<&Vec<Value>> {
+    package["metadata"]["api-check"]["profiles"]
+        .as_array()
+        .filter(|profiles| !profiles.is_empty())
+        .ok_or_else(|| "package.metadata.api-check.profiles must describe the supported stable feature profiles".into())
+}
+
+fn boundary_check(
+    document: &Value,
+    package: &Value,
+    metadata: &Value,
+    features: &[String],
+    output: &Path,
+) -> Result<bool> {
+    // An isolated consumer excludes workspace and dev-only feature unification from the library contract.
+    let consumer = tempfile::tempdir()?;
+    fs::create_dir(consumer.path().join("src"))?;
+    fs::write(consumer.path().join("src/lib.rs"), "")?;
+    let selected = features
+        .windows(2)
+        .find(|args| args[0] == "--features")
+        .map(|args| args[1].split(',').collect::<Vec<_>>())
+        .unwrap_or_default();
+    let manifest = consumer.path().join("Cargo.toml");
+    let dependency_dir = Path::new(required_str(package, "manifest_path")?)
+        .parent()
+        .ok_or("package manifest has no parent")?;
+    fs::write(
+        &manifest,
+        format!(
+            "[package]\nname = \"api-check-consumer\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\napi = {{ package = {}, path = {}, default-features = {}, features = {} }}\n",
+            serde_json::to_string(required_str(package, "name")?)?,
+            serde_json::to_string(&dependency_dir.to_string_lossy())?,
+            !features.iter().any(|arg| arg == "--no-default-features"),
+            serde_json::to_string(&selected)?,
+        ),
+    )?;
+    let mut resolved = cargo_metadata(&manifest, &[])?;
+    resolved["workspace_members"] = metadata["workspace_members"].clone();
+    resolved["target_directory"] = metadata["target_directory"].clone();
+    check_boundary(document, &package["metadata"]["api-check"], &resolved, |dependency| {
+        let node = resolved["resolve"]["nodes"]
+            .as_array()
+            .ok_or("metadata has no resolved nodes")?
+            .iter()
+            .find(|node| node["id"] == dependency["id"])
+            .ok_or("public dependency has no resolved features")?;
+        let features = string_array(&node["features"])?;
+        let mut args = vec!["--no-default-features".into()];
+        if !features.is_empty() {
+            args.extend(["--features".into(), features.join(",")]);
+        }
+        let name = required_str(dependency, "name")?;
+        rustdoc_document(
+            Path::new(required_str(dependency, "manifest_path")?),
+            &args,
+            &resolved,
+            name,
+            &output.join(format!("dependency-{}.json", library_name(dependency)?)),
+        )
+    })
+}
+
+fn check_boundary(
+    document: &Value,
+    policy: &Value,
+    metadata: &Value,
+    mut load: impl FnMut(&Value) -> Result<Value>,
+) -> Result<bool> {
+    let read_list = |key: &str| -> Result<Vec<String>> { policy.get(key).map_or_else(|| Ok(Vec::new()), string_array) };
+    let allowed_types = read_list("allowed-unstable-types")?;
+    let allowed_crates = read_list("allowed-unstable-crates")?;
+    let recursive = policy.get("recursive").map_or(Ok(false), |value| {
+        value.as_bool().ok_or("api-check.recursive must be a boolean")
+    })?;
+    let root = walk_supported(document, &[document["root"].clone()])?;
+    let mut valid = root.unsupported.is_empty();
+    let mut pending: Vec<_> = root.dependencies.into_iter().collect();
+    let mut documents = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    while let Some((name, paths)) = pending.pop() {
+        let Some(dependency) = workspace_library(metadata, &name)? else {
+            continue;
+        };
+        if !documents.contains_key(&name) {
+            documents.insert(name.clone(), load(dependency)?);
+        }
+        let document = &documents[&name];
+        let mut names = BTreeMap::new();
+        public_names(document, &document["root"], String::new(), None, &mut names)?;
+        let mut allowed_ids = BTreeSet::new();
+        for path in allowed_types
+            .iter()
+            .filter(|path| path.starts_with(&format!("{name}::")))
+        {
+            allowed_ids.insert(resolve_item(document, &names, path)?);
+        }
+        let provisional = required_str(dependency, "version")?.starts_with("0.");
+        let blanket = allowed_crates.contains(&name);
+        for path in paths {
+            let id = resolve_item(document, &names, &path)?;
+            if !seen.insert((name.clone(), id.clone())) {
+                continue;
+            }
+            let item = &document["index"][&id];
+            if unstable(item) || (provisional && !blanket && !allowed_ids.contains(&id)) {
+                eprintln!("Stable API exposes experimental plumbing item {path}");
+                valid = false;
+                continue;
+            }
+            if recursive {
+                let walk = walk_supported(document, &[Value::String(id)])?;
+                valid &= walk.unsupported.is_empty();
+                if provisional && !blanket {
+                    for id in &walk.seen {
+                        let item = &document["index"][id];
+                        if item["crate_id"] == 0 && type_definition(item) && !allowed_ids.contains(id) {
+                            let path = names.get(id).cloned().unwrap_or_else(|| item_path(document, id));
+                            eprintln!("Supported member of {name} exposes experimental plumbing type {path}");
+                            valid = false;
+                        }
+                    }
+                }
+                pending.extend(walk.dependencies);
+            }
+        }
+    }
+    Ok(valid)
+}
+
+fn workspace_library<'a>(metadata: &'a Value, name: &str) -> Result<Option<&'a Value>> {
+    let members = metadata["workspace_members"]
+        .as_array()
+        .ok_or("metadata has no workspace members")?;
+    let mut matches = metadata["packages"]
+        .as_array()
+        .ok_or("metadata has no packages")?
+        .iter()
+        .filter(|package| {
+            members.contains(&package["id"]) && library_name(package).is_ok_and(|library| library == name)
+        });
+    let result = matches.next();
+    if matches.next().is_some() {
+        return Err(format!("ambiguous workspace library {name}").into());
+    }
+    Ok(result)
+}
+
+fn resolve_item(document: &Value, names: &BTreeMap<String, String>, path: &str) -> Result<String> {
+    if let Some((id, _)) = names.iter().find(|(_, name)| name.as_str() == path) {
+        return Ok(id.clone());
+    }
+    document["paths"]
+        .as_object()
+        .ok_or("rustdoc has no paths")?
+        .iter()
+        .find(|(id, summary)| {
+            summary["crate_id"] == 0 && !document["index"][*id].is_null() && item_path(document, id) == path
+        })
+        .map(|(id, _)| id.clone())
+        .ok_or_else(|| format!("cannot resolve plumbing item {path} in dependency rustdoc").into())
+}
+
+fn item_path(document: &Value, id: &str) -> String {
+    document["paths"][id]["path"]
+        .as_array()
+        .map(|parts| parts.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("::"))
+        .unwrap_or_else(|| id.to_owned())
+}
+
+fn unstable(item: &Value) -> bool {
+    item["docs"].as_str().is_some_and(|docs| {
+        docs.lines()
+            .any(|line| line.starts_with("**Unstable:**") || line == "**Unstable.**")
+    })
+}
+
+fn type_definition(item: &Value) -> bool {
+    item["inner"].as_object().is_some_and(|inner| {
+        inner.keys().any(|kind| {
+            matches!(
+                kind.as_str(),
+                "struct" | "enum" | "union" | "trait" | "trait_alias" | "type_alias" | "extern_type"
+            )
+        })
+    })
 }
 
 fn rustdoc_document(
@@ -642,6 +867,14 @@ fn public_dependencies(document: &Value) -> Result<BTreeMap<String, BTreeSet<Str
 }
 
 fn walk_api(document: &Value) -> Result<ApiWalk<'_>> {
+    walk_items(document, &[document["root"].clone()], false)
+}
+
+fn walk_supported<'a>(document: &'a Value, roots: &[Value]) -> Result<ApiWalk<'a>> {
+    walk_items(document, roots, true)
+}
+
+fn walk_items<'a>(document: &'a Value, roots: &[Value], supported_only: bool) -> Result<ApiWalk<'a>> {
     if document["format_version"].as_u64() != Some(61) {
         return Err("the API walker requires rustdoc JSON format 61; review schema changes before updating it".into());
     }
@@ -652,8 +885,12 @@ fn walk_api(document: &Value) -> Result<ApiWalk<'_>> {
         document,
         seen: BTreeSet::new(),
         dependencies: BTreeMap::new(),
+        supported_only,
+        unsupported: BTreeSet::new(),
     };
-    walk.visit(&document["root"], false)?;
+    for root in roots {
+        walk.visit(root, false)?;
+    }
     Ok(walk)
 }
 
@@ -661,6 +898,8 @@ struct ApiWalk<'a> {
     document: &'a Value,
     seen: BTreeSet<String>,
     dependencies: BTreeMap<String, BTreeSet<String>>,
+    supported_only: bool,
+    unsupported: BTreeSet<String>,
 }
 
 impl ApiWalk<'_> {
@@ -671,6 +910,14 @@ impl ApiWalk<'_> {
         let key = item_key(id)?;
         let item = &self.document["index"][&key];
         if public_only && !item.is_null() && item["visibility"] != "public" {
+            return Ok(());
+        }
+        if self.supported_only && unstable(item) {
+            if !public_only && type_definition(item) {
+                let path = item_path(self.document, &key);
+                eprintln!("Stable API refers to experimental type {path}");
+                self.unsupported.insert(path);
+            }
             return Ok(());
         }
         // Rustdoc gives instantiated blanket impls the local crate ID, so use their trait's origin.
@@ -779,6 +1026,118 @@ impl ApiWalk<'_> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn named_exceptions_check_supported_dependency_members_recursively() -> gix_testtools::TestResult {
+        let metadata = json!({
+            "workspace_members": ["dep"],
+            "packages": [{"id": "dep", "name": "public_dep", "version": "0.1.0",
+                "targets": [{"name": "public_dep", "kind": ["lib"]}]}]
+        });
+        let root = json!({
+            "root": 0, "includes_private": false, "format_version": 61,
+            "external_crates": {"1": {"name": "public_dep"}},
+            "paths": {"10": {"crate_id": 1, "path": ["public_dep", "Item"]}},
+            "index": {
+                "0": {"name": "api", "crate_id": 0, "visibility": "public", "inner": {"module": {"items": [1]}}},
+                "1": {"name": "read", "crate_id": 0, "visibility": "public", "inner": {"function": {"sig": {"output": {"resolved_path": {"id": 10}}}}}}
+            }
+        });
+        let dependency = json!({
+            "root": 0, "includes_private": false, "format_version": 61, "external_crates": {},
+            "paths": {"1": {"crate_id": 0, "path": ["public_dep", "Item"]}, "2": {"crate_id": 0, "path": ["public_dep", "Other"]}},
+            "index": {
+                "0": {"name": "public_dep", "crate_id": 0, "visibility": "public", "inner": {"module": {"items": [1, 2]}}},
+                "1": {"name": "Item", "crate_id": 0, "visibility": "public", "inner": {"struct": {"kind": {"plain": {"fields": [3]}}, "impls": [4]}}},
+                "2": {"name": "Other", "crate_id": 0, "visibility": "public", "inner": {"struct": {"kind": "unit", "impls": []}}},
+                "3": {"name": "value", "crate_id": 0, "visibility": "public", "inner": {"struct_field": {"primitive": "bool"}}},
+                "4": {"crate_id": 0, "inner": {"impl": {"items": [5], "trait": null}}},
+                "5": {"name": "experimental", "crate_id": 0, "visibility": "public", "docs": "\n\n**Unstable.**", "inner": {"function": {"sig": {"output": {"resolved_path": {"id": 2}}}}}}
+            }
+        });
+        let policy = json!({"recursive": true, "allowed-unstable-types": ["public_dep::Item"]});
+        assert!(
+            check_boundary(&root, &policy, &metadata, |_| Ok(dependency.clone()))?,
+            "feature-unified experimental methods do not become supported members"
+        );
+        let mut leaked = dependency.clone();
+        leaked["index"]["3"]["inner"]["struct_field"] = json!({"resolved_path": {"id": 2}});
+        assert!(
+            !check_boundary(&root, &policy, &metadata, |_| Ok(leaked.clone()))?,
+            "a named type exception does not admit an unlisted type through a public field"
+        );
+        let mut direct = policy.clone();
+        direct["recursive"] = json!(false);
+        assert!(
+            check_boundary(&root, &direct, &metadata, |_| Ok(leaked.clone()))?,
+            "dependency member traversal is explicitly opt-in"
+        );
+        let mut leaked = dependency.clone();
+        leaked["index"]["5"]["docs"] = Value::Null;
+        assert!(
+            !check_boundary(&root, &policy, &metadata, |_| Ok(leaked.clone()))?,
+            "an ungated method returning an unlisted type is a supported API leak"
+        );
+        let mut blanket = policy.clone();
+        blanket["allowed-unstable-crates"] = json!(["public_dep"]);
+        assert!(
+            check_boundary(&root, &blanket, &metadata, |_| Ok(leaked.clone()))?,
+            "a whole-crate exception intentionally admits all of its own types"
+        );
+        let mut root = root;
+        root["paths"]["10"]["path"] = json!(["public_dep", "Other"]);
+        assert!(
+            !check_boundary(&root, &policy, &metadata, |_| Ok(dependency.clone()))?,
+            "a new direct type from an already allowed dependency is still rejected"
+        );
+        let typo = json!({"allowed-unstable-types": ["public_dep::Missing"]});
+        assert!(
+            check_boundary(&root, &typo, &metadata, |_| Ok(dependency.clone())).is_err(),
+            "misspelled exceptions cannot silently grant permission"
+        );
+        let mut transitive_root = root;
+        transitive_root["paths"]["10"]["path"] = json!(["public_dep", "Item"]);
+        let mut transitive = dependency.clone();
+        transitive["external_crates"] = json!({"1": {"name": "other_dep"}});
+        transitive["paths"]["20"] = json!({"crate_id": 1, "path": ["other_dep", "Payload"]});
+        transitive["index"]["3"]["inner"]["struct_field"] = json!({"resolved_path": {"id": 20}});
+        let other = json!({
+            "root": 0, "includes_private": false, "format_version": 61, "external_crates": {},
+            "paths": {"1": {"crate_id": 0, "path": ["other_dep", "Payload"]}},
+            "index": {
+                "0": {"name": "other_dep", "crate_id": 0, "visibility": "public", "inner": {"module": {"items": [1]}}},
+                "1": {"name": "Payload", "crate_id": 0, "visibility": "public", "inner": {"struct": {"kind": "unit", "impls": []}}}
+            }
+        });
+        let mut metadata = metadata;
+        metadata["workspace_members"] = json!(["dep", "other"]);
+        metadata["packages"].as_array_mut().expect("test metadata has packages").push(json!({
+            "id": "other", "name": "other_dep", "version": "0.1.0", "targets": [{"name": "other_dep", "kind": ["lib"]}]
+        }));
+        assert!(
+            !check_boundary(&transitive_root, &policy, &metadata, |package| {
+                Ok(if package["name"] == "public_dep" {
+                    transitive.clone()
+                } else {
+                    other.clone()
+                })
+            })?,
+            "recursive checks cross dependency boundaries rather than stopping at the first allowed type"
+        );
+        let mut policy = policy;
+        policy["allowed-unstable-types"] = json!(["public_dep::Item", "other_dep::Payload"]);
+        assert!(
+            check_boundary(&transitive_root, &policy, &metadata, |package| {
+                Ok(if package["name"] == "public_dep" {
+                    transitive.clone()
+                } else {
+                    other.clone()
+                })
+            })?,
+            "each exposed provisional type needs its own explicit exception"
+        );
+        Ok(())
+    }
 
     #[test]
     fn public_graph_follows_associated_types_and_ignores_private_fields() -> gix_testtools::TestResult {

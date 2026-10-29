@@ -182,6 +182,7 @@ impl Prefix {
     }
 
     /// Return a type which displays this prefix in JJ-compatible reverse-hex notation.
+    #[gix_macros::unstable(reason = "Returns an experimental formatting type.")]
     pub fn to_reverse_hex(&self) -> ReverseHexDisplay<'_> {
         ReverseHexDisplay::new(&self.bytes, self.hex_len)
     }
