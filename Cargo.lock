@@ -3320,6 +3320,7 @@ dependencies = [
  "gix",
  "gix-testtools",
  "regex",
+ "serde_json",
 ]
 
 [[package]]
