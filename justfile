@@ -40,6 +40,13 @@ clippy-fix:
 check:
     etc/scripts/cargo-check-all.sh
 
+# Check the working tree's stable API boundary using the same manifest-driven checks as CI (Rust 1.99)
+[group('Development')]
+check-api:
+    cargo test -p internal-tools
+    etc/scripts/check-gix-api.sh
+    etc/scripts/check-api.sh boundary gix/Cargo.toml
+
 # Check cargo-auditable compatibility (install with `cargo install cargo-auditable --locked`)
 [group('Development')]
 check-auditable:

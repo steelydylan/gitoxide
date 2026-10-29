@@ -23,13 +23,11 @@ Stability covers all reachable public types and implementations, including input
 types, fields, callbacks, associated types, generic bounds and trait conversions.
 An unstable dependency used only internally does not require a breaking release
 of its consumer. Re-exporting a type does not hide its dependency identity.
-Foundational crates such as `gix-hash` and `gix-trace` therefore need their own
-stability commitments before APIs exposing them can be stabilized.
-
-TODO: stabilize `gix-error`. Its errors, metadata, classifications and helpers are
-temporarily permitted in the baseline so this migration does not hide every
-fallible operation. This exception does not claim compatibility across future
-breaking versions of `gix-error`. Concrete plumbing causes remain diagnostic
+Foundational plumbing needs compatibility commitments before `gix` reaches 1.0.
+Until then, stable consumers declare temporary type exceptions in their Cargo
+manifests, as described below. These exceptions permit useful operations while
+their dependencies remain pre-1.0; they do not waive breaking dependency identity
+or signature checks. Concrete plumbing causes remain diagnostic
 details unless a gated API explicitly documents the supported downcast.
 
 For each public type, decide whether construction and exhaustive matching are
@@ -41,6 +39,16 @@ These baselines prepare for stability; they do not promote `gix` or its
 foundational crates to version 1.0.
 
 ## Checking a release boundary
+
+Run `just check-api` to check local changes against the same stable API boundary
+checks as CI. It tests the release checker, compiles isolated stable and experimental
+consumers, and recursively audits the supported members of `gix`'s reachable
+workspace plumbing types against its manifest exceptions in each supported profile.
+It checks the current working tree, including uncommitted changes, and respects
+`CARGO_TARGET_DIR`. Use Rust 1.99, which produces the supported rustdoc JSON format
+(for example, `RUSTUP_TOOLCHAIN=1.99.0 just check-api`). These probes and audits do
+not compare every API against a previous revision; use the release checker below
+for that comparison.
 
 The `gix-lock` and `gix-tempfile` manifests opt into the API checker through
 `package.metadata.smart-release`. A version of `cargo smart-release` with API
@@ -70,7 +78,9 @@ Capture the initial baseline after gating. Subsequently compare against the
 latest release so later stabilizations also become protected. The first gated
 release will correctly differ incompatibly from its ungated predecessor.
 `etc/scripts/check-gix-api.sh` separately checks downstream access with the feature
-both disabled and enabled, outside workspace feature unification.
+both disabled and enabled, outside workspace feature unification. Boundary audits
+apply the consuming manifest's exceptions to workspace plumbing; other dependencies
+remain subject to release signature and identity checks.
 
 ## Terminology
 

@@ -191,6 +191,10 @@ fn boundary_check(
 ) -> Result<bool> {
     // An isolated consumer excludes workspace and dev-only feature unification from the library contract.
     let consumer = tempfile::tempdir()?;
+    fs::copy(
+        Path::new(required_str(metadata, "workspace_root")?).join("Cargo.lock"),
+        consumer.path().join("Cargo.lock"),
+    )?;
     fs::create_dir(consumer.path().join("src"))?;
     fs::write(consumer.path().join("src/lib.rs"), "")?;
     let selected = features
