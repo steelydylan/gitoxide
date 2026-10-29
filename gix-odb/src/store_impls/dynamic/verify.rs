@@ -126,9 +126,10 @@ impl super::Store {
                     .map_or_else(Default::default, std::ffi::OsStr::to_string_lossy)
             )
         };
+        let slots = self.files.load();
         gix_trace::detail!("verify indices").into_scope(|| {
             for slot_index in &index.slot_indices {
-                let slot = &self.files[*slot_index];
+                let slot = &slots[*slot_index];
                 if slot.generation.load(Ordering::SeqCst) != index.generation {
                     return Err(changed());
                 }

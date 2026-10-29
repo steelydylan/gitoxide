@@ -40,16 +40,17 @@ impl Default for Options {
     }
 }
 
-/// Configures the number of slots in the index slotmap, which is fixed throughout the existence of the store.
+/// Configures the capacity of the index slotmap.
 #[derive(Copy, Clone, Debug)]
 pub enum Slots {
-    /// The number of slots to use, that is the total number of indices we can hold at a time.
+    /// A fixed number of slots, that is the total number of indices we can hold at a time.
     /// Using this has the advantage of avoiding an initial directory listing of the repository, and is recommended
     /// on the server side where the repository setup is controlled.
     ///
     /// Note that this won't affect their packs, as each index can have one or more packs associated with it.
     Given(u16),
-    /// Compute the number of slots needed, as probably best used on the client side where a variety of repositories is encountered.
+    /// Compute the initial capacity from disk and grow it as needed, up to 2^15-1 slots.
+    /// This is suitable for clients that fetch into a repository while keeping it open.
     AsNeededByDiskState {
         /// 1.0 means no safety, 1.1 means 10% more slots than needed
         multiplier: f32,
@@ -138,7 +139,10 @@ impl Store {
             write: Default::default(),
             replacements,
             path: objects_dir,
-            files: Vec::from_iter(std::iter::repeat_with(MutableIndexAndPack::default).take(slot_count)),
+            files: ArcSwap::from_pointee(Vec::from_iter(
+                std::iter::repeat_with(|| Arc::new(MutableIndexAndPack::default())).take(slot_count),
+            )),
+            grow_slots: matches!(slots, Slots::AsNeededByDiskState { .. }),
             index: ArcSwap::new(Arc::new(SlotMapIndex::default())),
             use_multi_pack_index,
             object_hash,
