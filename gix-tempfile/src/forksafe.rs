@@ -107,6 +107,21 @@ fn persist_windows(source: &mut TempfileOrTemppath, destination: &Path) -> std::
     }
 }
 
+/// Return the id of the current process, which is used to only clean up tempfiles owned by it after a `fork()`.
+///
+/// WASI has neither process ids nor `fork()`, and `std::process::id()` panics there.
+/// All tempfiles belong to the one process that exists, so a constant is used instead.
+pub(crate) fn current_process_id() -> u32 {
+    #[cfg(target_os = "wasi")]
+    {
+        0
+    }
+    #[cfg(not(target_os = "wasi"))]
+    {
+        std::process::id()
+    }
+}
+
 enum TempfileOrTemppath {
     Tempfile(NamedTempFile),
     Temppath(TempPath),
@@ -127,7 +142,7 @@ impl ForksafeTempfile {
                 Writable => TempfileOrTemppath::Tempfile(tempfile),
             },
             cleanup,
-            owning_process_id: std::process::id(),
+            owning_process_id: current_process_id(),
         }
     }
 }

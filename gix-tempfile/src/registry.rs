@@ -10,7 +10,7 @@ use crate::REGISTRY;
 /// at the expense of possibly missing a lock file if another thread wants to obtain it or put it back
 /// (i.e. mutates the registry shard).
 pub fn cleanup_tempfiles_signal_safe() {
-    let current_pid = std::process::id();
+    let current_pid = crate::forksafe::current_process_id();
     #[cfg(feature = "hp-hashmap")]
     {
         use std::sync::atomic::Ordering;
@@ -49,7 +49,7 @@ pub fn cleanup_tempfiles_signal_safe() {
 ///
 /// Must not be called from within signal hooks. For that, use [`cleanup_tempfiles_signal_safe()`].
 pub fn cleanup_tempfiles() {
-    let current_pid = std::process::id();
+    let current_pid = crate::forksafe::current_process_id();
     #[cfg(feature = "hp-hashmap")]
     REGISTRY.iter_mut().for_each(|mut tf| {
         if tf.as_ref().is_some_and(|tf| tf.owning_process_id == current_pid) {
