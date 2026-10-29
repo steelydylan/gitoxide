@@ -107,14 +107,10 @@ impl File {
                 }
             }
 
-            (
-                data,
-                filetime::FileTime::from_last_modification_time(
-                    &file
-                        .metadata()
-                        .or_raise(|| message("An IO error occurred while opening the index"))?,
-                ),
-            )
+            let meta = file
+                .metadata()
+                .or_raise(|| message("An IO error occurred while opening the index"))?;
+            (data, last_modification_time(&meta)?)
         };
 
         let (state, checksum) = State::from_bytes(&data, mtime, object_hash, options)?;
@@ -136,4 +132,21 @@ impl File {
             checksum: None,
         }
     }
+}
+
+/// Return the modification time of the index file.
+///
+/// `filetime` has no implementation for WASI and panics in `FileTime::from_last_modification_time()` there,
+/// but `std` knows the modification time.
+#[cfg(target_os = "wasi")]
+fn last_modification_time(meta: &std::fs::Metadata) -> Result<filetime::FileTime> {
+    let mtime = meta
+        .modified()
+        .or_raise(|| message("Could not obtain the modification time of the index"))?;
+    Ok(filetime::FileTime::from_system_time(mtime))
+}
+
+#[cfg(not(target_os = "wasi"))]
+fn last_modification_time(meta: &std::fs::Metadata) -> Result<filetime::FileTime> {
+    Ok(filetime::FileTime::from_last_modification_time(meta))
 }
